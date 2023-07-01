@@ -68,7 +68,7 @@ void	error(char *msg)
 	exit(1);
 }
 
-void	free_close(t_client **cli_lst)
+void	free_close(t_client **cli_lst, int sockfd)
 {
 	t_client	*prev;
 	t_client	*curr;
@@ -82,6 +82,7 @@ void	free_close(t_client **cli_lst)
 		free(prev->buf);
 		free(prev);
 	}
+	close(sockfd);
 	error("Fatal error\n");
 }
 
@@ -169,25 +170,29 @@ int	main(int argc, char **argv)
 	fd_set				master_fd, read_fd, write_fd;
 	char				buffer[4097];
 
-	int					optval = 1;
-
 	if (argc != 2)
 		error("Wrong number of arguments\n");
 	
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd == -1)
 		error("Fatal error\n");
-	setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &optval, sizeof(optval));
+
 	bzero(&servaddr, sizeof(servaddr));
 	servaddr.sin_family = AF_INET;
 	servaddr.sin_addr.s_addr = htonl(2130706433);
 	servaddr.sin_port = htons(atoi(argv[1]));
 
 	if (bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr)) != 0)
+	{
+		close(sockfd);
 		error("Fatal error\n");
+	}
 	
 	if (listen(sockfd, 4096) != 0)
+	{
+		close(sockfd);
 		error("Fatal error\n");
+	}
 
 	len = sizeof(cliaddr);
 	FD_ZERO(&master_fd);
@@ -205,13 +210,13 @@ int	main(int argc, char **argv)
 		{
 			clifd = accept(sockfd, (struct sockaddr *)&cliaddr, &len);
 			if (clifd < 0)
-				free_close(&cli_lst);
+				free_close(&cli_lst, sockfd);
 			if (add_client(&cli_lst, clifd, id) == -1)
-				free_close(&cli_lst);
+				free_close(&cli_lst, sockfd);
 			sprintf(buffer, "server: client %d just arrived\n", id);
 			FD_SET(clifd, &master_fd);
 			if (send_to_all(write_fd, cli_lst, buffer, id) == -1)
-				free_close(&cli_lst);
+				free_close(&cli_lst, sockfd);
 			id++;
 			continue;
 		}
@@ -226,7 +231,7 @@ int	main(int argc, char **argv)
 				recv_ret = recv(curr_cli->fd, buffer, 4096, 0);
 				curr_cli->buf = str_join(curr_cli->buf, buffer);
 				if (!curr_cli->buf)
-					free_close(&cli_lst);
+					free_close(&cli_lst, sockfd);
 				if (recv_ret == 0)
 				{
 					t_client	*quit_cli;
@@ -237,20 +242,26 @@ int	main(int argc, char **argv)
 					
 					if (quit_cli->buf && strlen(quit_cli->buf) > 0)
 					{
+						// not the best practice for this sprintf because i put what remains of the clients quit->buf inside buffer but buffer has
+						// a fixed size of 4097 so if quit->buf is bigger i may have some problems...
+						// To anticipate this you may use malloc
+						// but for the exam it is sufficient
+
 						sprintf(buffer, "client %d: %s", quit_cli->id, quit_cli->buf);
 						if (send_to_all(write_fd, cli_lst, buffer, quit_cli->id) == -1)
-							free_close(&cli_lst);
+							free_close(&cli_lst, sockfd);
 						bzero(&buffer, 4096);
 					}
 					sprintf(buffer, "server: client %d just left\n", quit_cli->id);
 					if (send_to_all(write_fd, cli_lst, buffer, quit_cli->id) == -1)
-						free_close(&cli_lst);
+						free_close(&cli_lst, sockfd);
 					remove_client(&cli_lst, quit_cli->id);
 				}
 				else
 				{
 					ssize_t	ret;
-					char	*msg = NULL, *str = NULL;
+					char	*msg = NULL;
+					char	*str = NULL;
 
 					while ((ret = extract_message(&curr_cli->buf, &msg)) == 1)
 					{
@@ -258,16 +269,21 @@ int	main(int argc, char **argv)
 						if (!str)
 						{
 							free(msg);
-							free_close(&cli_lst);
+							free_close(&cli_lst, sockfd);
 						}
 						sprintf(str, "client %d: %s", curr_cli->id, msg);
 						free(msg);
 						if (send_to_all(write_fd, cli_lst, str, curr_cli->id))
-							free_close(&cli_lst);
+						{
+							free(str);
+							free_close(&cli_lst, sockfd);
+						}
 						free(str);
+						str = NULL;
+						msg = NULL;
 					}
 					if (ret == -1)
-						free_close(&cli_lst);
+						free_close(&cli_lst, sockfd);
 					curr_cli = curr_cli->next;
 				}
 			}
